@@ -1,13 +1,53 @@
 ---
 # -------------------------
-# Create groups if not exist
+# Create User — Secure Interactive Mode
 # -------------------------
-- name: Create groups with optional gid
+
+# -------------------------
+# Check if user already exists (clean version)
+# -------------------------
+- name: Check if user exists
+  command: id "{{ target_username }}"
+  register: user_check
+  changed_when: false
+  failed_when: false
+
+
+- name: Abort if user already exists
+  fail:
+    msg: "User '{{ target_username }}' already exists. Aborting."
+  when: user_check.rc == 0
+
+
+# -------------------------
+# Ensure allowed groups exist (create if missing)
+# -------------------------
+- name: Create allowed groups
   group:
     name: "{{ item.name }}"
     gid: "{{ item.gid | default(omit) }}"
     state: present
   loop: "{{ allowed_groups }}"
+
+
+# -------------------------
+# Gather system groups
+# -------------------------
+- name: Gather system groups
+  getent:
+    database: group
+
+
+# -------------------------
+# Validate allowed groups exist in system
+# -------------------------
+- name: Validate allowed groups in OS
+  assert:
+    that:
+      - item.name in ansible_facts.getent_group.keys()
+    fail_msg: "Group '{{ item.name }}' does not exist on system"
+  loop: "{{ allowed_groups }}"
+
 
 # -------------------------
 # Build allowed group name list
@@ -16,37 +56,10 @@
   set_fact:
     allowed_group_names: "{{ allowed_groups | map(attribute='name') | list }}"
 
-# -------------------------
-# Build user_config (with safe defaults)
-# -------------------------
-- name: Build effective user config
-  set_fact:
-    user_config: "{{ user_conf_default | combine({
-        'groups': (target_groups | default(primary_group) | split(',') | map('trim') | list),
-        'comment': user_conf_default.comment,
-        'home_dir': user_conf_default.home_dir
-      }, recursive=True) }}"
 
 # -------------------------
-# Validate requested groups exist
+# INTERACTIVE INPUTS
 # -------------------------
-- name: Validate requested groups
-  assert:
-    that:
-      - item in allowed_group_names
-    fail_msg: "Group '{{ item }}' is not allowed. Allowed: {{ allowed_group_names }}"
-  loop: "{{ user_config.groups }}"
-
-# -------------------------
-# Show shell options
-# -------------------------
-- name: Show shell options
-  debug:
-    msg: |
-      Available shells:
-      {% for path,name in shell_options.items() %}
-      {{ loop.index }}. {{ name }} ({{ path }})
-      {% endfor %}
 
 # -------------------------
 # Prompt for primary group
@@ -58,7 +71,12 @@
 
 - name: Set chosen primary group
   set_fact:
-    chosen_primary_group: "{{ (group_input.user_input | trim) if (group_input.user_input | trim | length > 0) else primary_group }}"
+    chosen_primary_group: >-
+      {{
+        (group_input.user_input | trim)
+        if (group_input.user_input | trim | length > 0)
+        else primary_group
+      }}
 
 - name: Validate chosen primary group
   assert:
@@ -66,77 +84,99 @@
       - chosen_primary_group in allowed_group_names
     fail_msg: "Group '{{ chosen_primary_group }}' is not allowed"
 
+
 # -------------------------
-# Account expiration prompt (REQUIRED, 0 = infinite)
+# Account expiration (REQUIRED)
 # -------------------------
 - name: Ask account expiration days
   pause:
-    prompt: "Enter account expiration days from now (0 = infinite, required)"
+    prompt: "Enter account expiration days from now (0 = infinite, REQUIRED)"
   register: expire_input
 
-- name: Validate account expiration input
+- name: Validate account expiration
   assert:
     that:
       - expire_input.user_input | trim | length > 0
       - expire_input.user_input is match('^[0-9]+$')
-    fail_msg: "Account expiration days is required and must be numeric (0 = infinite)"
+    fail_msg: "Account expiration must be numeric (0 allowed)"
 
-- name: Compute account expiration epoch
+- name: Compute expiration epoch
   set_fact:
-    account_expires_epoch: "{{ (ansible_date_time.epoch | int) + ((expire_input.user_input | int) * 86400) }}"
+    account_expires_epoch: >-
+      {{
+        (ansible_date_time.epoch | int)
+        + ((expire_input.user_input | int) * 86400)
+      }}
   when: expire_input.user_input | int > 0
 
-# if input == 0 → omit expires → infinite
 
 # -------------------------
-# Password expiration prompt (REQUIRED, 0 = infinite)
+# Password expiration (REQUIRED)
 # -------------------------
 - name: Ask password max days
   pause:
-    prompt: "Enter password max days (0 = infinite, required)"
+    prompt: "Enter password max days (0 = infinite, REQUIRED)"
   register: passmax_input
 
-- name: Validate password max days input
+- name: Validate password max days
   assert:
     that:
       - passmax_input.user_input | trim | length > 0
       - passmax_input.user_input is match('^[0-9]+$')
-    fail_msg: "Password max days is required and must be numeric (0 = infinite)"
+    fail_msg: "Password max days must be numeric (0 allowed)"
 
-- name: Set password max days fact
+- name: Set password max days
   set_fact:
     password_max_days: "{{ passmax_input.user_input | int }}"
 
-# -------------------------
-# Password flow
-# -------------------------
-- name: Collect password
-  include_tasks: tasks/shared/password.yml
 
 # -------------------------
-# Create user (no same-name group)
+# PASSWORD COLLECTION
 # -------------------------
+
+- name: Collect password securely
+  include_tasks: tasks/shared/password.yml
+
+
+# -------------------------
+# CREATE USER
+# -------------------------
+
 - name: Create user
   user:
     name: "{{ target_username }}"
     state: present
     password: "{{ encrypted_password | default(omit) }}"
     update_password: always
-    shell: "{{ user_config.shell }}"
-    comment: "{{ user_config.comment }}"
-    create_home: "{{ user_config.create_home }}"
-    home: "{{ user_config.home_dir }}"
-    system: "{{ user_config.system_user }}"
-    uid: "{{ user_config.uid | default(omit) }}"
+    shell: "{{ user_conf_default.shell }}"
+    comment: "{{ user_conf_default.comment }}"
+    create_home: "{{ user_conf_default.create_home }}"
+    home: "{{ user_conf_default.home_dir }}"
+    system: "{{ user_conf_default.system_user }}"
+    uid: "{{ user_conf_default.uid | default(omit) }}"
     expires: "{{ account_expires_epoch | default(omit) }}"
     group: "{{ chosen_primary_group }}"
-    groups: "{{ user_config.groups }}"
+    groups: "{{ secondary_groups | default([]) }}"
     append: true
   register: user_create_result
 
+
 # -------------------------
-# Set password aging policy
+# Set home directory permissions
 # -------------------------
+- name: Set home directory permissions
+  file:
+    path: "{{ user_conf_default.home_dir }}"
+    owner: "{{ target_username }}"
+    group: "{{ chosen_primary_group }}"
+    mode: "{{ user_conf_default.home_permissions }}"
+  when: user_conf_default.create_home
+
+
+# -------------------------
+# PASSWORD AGING POLICY
+# -------------------------
+
 - name: Set password expiration policy
   command: >
     chage -M {{ (password_max_days == 0) | ternary(-1, password_max_days) }}

@@ -7,6 +7,7 @@ allowed_groups:
     gid: 2002
 
 primary_group: developers
+secondary_groups: []
 
 # Operation timeout (seconds)
 operation_timeout: 300
@@ -25,7 +26,7 @@ user_conf_default:
   create_home: true
   home_permissions: '0750'
   system_user: false
-  password_min_length: 12
+  password_min_length: 14
   password_complexity: true
   comment: "{{ target_username }}"
   home_dir: "/home/{{ target_username }}"
